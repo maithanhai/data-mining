@@ -24,6 +24,10 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
+LOG_DIR = PROJECT_ROOT / "outputs" / "logs"
+
 # Selenium imports
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -172,42 +176,6 @@ def _labeled_values(soup):
     return values
 
 
-def _experience_years(raw):
-    """Khoảng năm; cận không xác định để trống, không biến thiếu thành 0."""
-    text = (raw or "").casefold()
-    if any(word in text for word in ("không yêu cầu", "chưa có kinh nghiệm")):
-        return 0.0, None
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:[-–]|đến)\s*(\d+(?:[.,]\d+)?)\s*(năm|tháng)", text)
-    if match:
-        scale = 12 if match[3] == "tháng" else 1
-        return float(match[1].replace(",", ".")) / scale, float(match[2].replace(",", ".")) / scale
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(năm|tháng)", text)
-    if not match:
-        return None, None
-    number = float(match[1].replace(",", ".")) / (12 if match[2] == "tháng" else 1)
-    if "dưới" in text:
-        return 0.0, number
-    if any(word in text for word in ("trên", "từ", "ít nhất", "tối thiểu", "trở lên", "+")):
-        return number, None
-    return number, number
-
-
-def _seniority(title, raw_level):
-    """Chỉ ánh xạ nhãn rõ ràng; 'Nhân viên' không đồng nghĩa Junior."""
-    for source, text in (("Cap_Bac", raw_level), ("Tieu_De", title)):
-        text = (text or "").casefold()
-        for level, pattern in (
-            ("Lead", r"\b(lead|leader|head|manager)\b|trưởng nhóm|trưởng/phó phòng|trưởng phòng"),
-            ("Senior", r"\bsenior\b"),
-            ("Middle", r"\b(middle|mid-level|mid level)\b"),
-            ("Junior", r"\bjunior\b"),
-            ("Fresher", r"\b(fresher|intern|internship|trainee)\b|thực tập|mới tốt nghiệp"),
-        ):
-            if re.search(pattern, text):
-                return level, source
-    return None, None
-
-
 def parse_topcv_html(html, job_url, fallback_info=None):
     """Phân tích DOM đã tải; các trường thô không chuẩn hóa hoặc bỏ HTML."""
     fallback = fallback_info or {}
@@ -223,56 +191,53 @@ def parse_topcv_html(html, job_url, fallback_info=None):
     location = None
     for item in soup.select(".box-job-information-address-and-time-list__item"):
         label = _text(item.select_one(".box-job-information-address-and-time-list__item--title"))
-        if label and label.casefold() == "địa điểm làm việc":
+        if label and label.casefold().strip(" :") in ("địa điểm làm việc", "location", "work location", "working location"):
             location = _text(item.select_one(".box-job-information-address-and-time-list__item--content"))
             break
     content = {}
     for item in sections:
-        heading = _text(item.select_one(".box-job-information-detail-item__title, h3"))
+        heading_node = item.select_one(".box-job-information-detail-item__title h2, h3") or item.select_one(".box-job-information-detail-item__title")
+        heading = _text(heading_node)
         if not heading:
             continue
         heading = heading.casefold()
         key = None
-        if "mô tả công việc" in heading or "job description" in heading:
-            key = "Mo_Ta_Cong_Viec"
-        elif "yêu cầu" in heading:
+        classes = item.get("class", [])
+        if "box-job-information-required-candidate" in classes:
             key = "Yeu_Cau"
-        elif "quyền lợi" in heading or "chế độ" in heading:
+        elif "box-job-information-benefit" in classes:
+            key = "Quyen_Loi"
+        elif "mô tả công việc" in heading or "job description" in heading:
+            key = "Mo_Ta_Cong_Viec"
+        elif "yêu cầu" in heading or "requirements" in heading or "qualifications" in heading:
+            key = "Yeu_Cau"
+        elif "quyền lợi" in heading or "chế độ" in heading or "benefits" in heading:
             key = "Quyen_Loi"
         node = item.select_one(".box-job-information-detail-item__text, .job-description__item--content")
         if key and node:
             # Giữ cả nội dung phụ (kỹ năng/phúc lợi) nằm ngoài khối text.
             nodes = [node, *item.select(".required-tags")]
-            content[key] = "\n".join(str(part) for part in nodes)
+            if key == "Mo_Ta_Cong_Viec":
+                content[key] = "\n".join(str(part) for part in nodes)
+            else:
+                # Mỗi mục giữ HTML tiêu đề và nội dung gốc, không ghép hai cột.
+                content[key] = "\n".join(str(part) for part in [heading_node, *nodes])
     if not content.get("Mo_Ta_Cong_Viec"):
         raise ValueError("Thiếu khối mô tả công việc; không lưu tin giả đầy đủ")
     experience = values.get("kinh nghiệm") or values.get("kinh nghiệm chuyên môn") or fallback.get("Kinh_Nghiem")
-    low, high = _experience_years(experience)
-    level = values.get("cấp bậc")
-    seniority, seniority_source = _seniority(title, level)
     job = {
         "Tieu_De": title,
         "Ten_Cong_Ty": company or fallback.get("Ten_Cong_Ty"),
         "Dia_Diem": location or values.get("địa điểm") or fallback.get("Dia_Diem"),
         "Muc_Luong_Goc": salary or fallback.get("Muc_Luong_Goc"),
         "Kinh_Nghiem": experience,
-        **{key: content.get(key) for key in ("Mo_Ta_Cong_Viec", "Yeu_Cau", "Quyen_Loi")},
-        "Yeu_Cau_Quyen_Loi": "\n".join(filter(None, (content.get("Yeu_Cau"), content.get("Quyen_Loi")))) or None,
+        "Mo_Ta_Cong_Viec": content.get("Mo_Ta_Cong_Viec"),
+        "Yeu_Cau": content.get("Yeu_Cau"),
+        "Quyen_Loi": content.get("Quyen_Loi"),
+        "Cap_Bac": values.get("cấp bậc"),
         "URL_Goc": job_url,
         "Timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "Cap_Bac": level,
-        "Cap_Bac_Chuan": seniority,
-        "Nguon_Cap_Bac_Chuan": seniority_source,
-        "Kinh_Nghiem_Min": low,
-        "Kinh_Nghiem_Max": high,
-        "Kinh_Nghiem_Quan_Ly": values.get("kinh nghiệm quản lý"),
-        "Hinh_Thuc": values.get("hình thức làm việc") or values.get("hình thức"),
-        "Loai_Hinh": values.get("loại hình làm việc"),
     }
-    job["Truong_Thieu"] = ";".join(
-        key for key in ("Ten_Cong_Ty", "Dia_Diem", "Muc_Luong_Goc", "Kinh_Nghiem", "Yeu_Cau", "Quyen_Loi", "Cap_Bac")
-        if not job.get(key)
-    )
     return job
 
 
@@ -336,9 +301,9 @@ def _job_url(href, base_url):
     return urlunsplit(parts._replace(query="", fragment=""))
 
 
-def crawl_topcv(search_urls, max_pages_per_url=None, output_csv="raw_data.csv", max_jobs=None):
-    """Duyệt tới trang cuối; giới hạn chỉ áp dụng khi người chạy chỉ định."""
-    output = Path(output_csv)
+def crawl_topcv(search_urls, max_pages_per_url=None, output_csv=None, max_jobs=None):
+    """Duyệt tới trang cuối; mặc định lưu dữ liệu thô tại data/raw."""
+    output = Path(output_csv) if output_csv is not None else RAW_DATA_DIR / f"raw_data_{datetime.now():%Y%m%d_%H%M%S}.csv"
     # Không ghi đè bộ dữ liệu người dùng đã có.
     if output.exists():
         raise FileExistsError(f"{output} đã tồn tại. Chọn --output khác để giữ dữ liệu cũ.")
@@ -349,8 +314,8 @@ def crawl_topcv(search_urls, max_pages_per_url=None, output_csv="raw_data.csv", 
     robots.parse(response.text.splitlines())
     driver = init_driver()
     all_jobs, failures, seen_urls = [], [], set()
-    run_timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    errors_path = output.with_suffix(".errors.csv")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    errors_path = LOG_DIR / f"{output.stem}.errors.csv"
 
     def save():
         if all_jobs:
@@ -404,9 +369,8 @@ def crawl_topcv(search_urls, max_pages_per_url=None, output_csv="raw_data.csv", 
                     try:
                         visit_allowed(job_url)
                         job = parse_topcv_job_detail(driver, job_url, fallback)
-                        job.update(URL_Tim_Kiem=page_url, Timestamp_Bat_Dau=run_timestamp)
                         all_jobs.append(job)
-                        print(f"[{len(all_jobs)}] {job['Tieu_De']} | thiếu: {job['Truong_Thieu'] or 'không'}")
+                        print(f"[{len(all_jobs)}] {job['Tieu_De']}")
                     except (WebDriverException, ValueError, PermissionError) as error:
                         failures.append({
                             "URL_Goc": job_url, "URL_Tim_Kiem": page_url,
@@ -447,7 +411,7 @@ if __name__ == "__main__":
     parser.add_argument("--url", action="append", help="URL TopCV; có thể truyền nhiều lần.")
     parser.add_argument("--max-pages", type=int, help="Giới hạn số trang để demo; mặc định duyệt hết.")
     parser.add_argument("--max-jobs", type=int, help="Giới hạn số tin để demo; mặc định không giới hạn.")
-    parser.add_argument("--output", default=f"raw_data_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    parser.add_argument("--output", help="Đường dẫn CSV tùy chọn; mặc định lưu trong data/raw của project.")
     args = parser.parse_args()
     if any(value is not None and value < 1 for value in (args.max_pages, args.max_jobs)):
         parser.error("--max-pages và --max-jobs phải lớn hơn 0")
