@@ -404,7 +404,7 @@ def crawl_topcv(search_urls, max_pages_per_url=None, output_csv=None, max_jobs=N
 
 if __name__ == "__main__":
     TOPCV_SEARCH_URLS = [
-        "https://www.topcv.vn/tim-viec-lam-quan-tri-website-cr257cb270cl1097?type_keyword=1&disable_auto_detect_type_keyword=1&sba=1&category_family=r257~b258_b259_b263_b265_b266_b267_b268_b270l1097&saturday_status=0"
+        "https://www.topcv.vn/tim-viec-lam-devops-engineer-cr257cb262cl288?type_keyword=1&disable_auto_detect_type_keyword=1&sba=1&category_family=r257~b258_b259_b262l288,290_b264l304_b265_b266l308,311,309,310,312,313_b267l317,320_b268_b269l324,327,326&saturday_status=0"
     ]
 
     parser = argparse.ArgumentParser(description="Thu thập dữ liệu thô TopCV, giữ HTML và dấu vết thời gian.")
