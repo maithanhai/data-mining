@@ -1,0 +1,418 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  TopCV Web Scraper — ITEC3417 Bài Tập Lớn Khai Phá Dữ Liệu                ║
+║  Mục tiêu: Thu thập 800–1.500+ tin tuyển dụng CNTT & Khoa học dữ liệu      ║
+║  Output : CSV dữ liệu thô, HTML gốc và dấu vết thu thập                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+Quy trình:
+  1. Duyệt trang danh sách tìm kiếm (search listing) → gom URL từng việc làm
+  2. Truy cập từng trang chi tiết → đọc đúng nhãn, giữ HTML nội dung
+  3. Lưu sau mỗi tin; ghi riêng URL lỗi và không ghi đè dữ liệu cũ
+"""
+
+import argparse
+import re
+import time
+import random
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.robotparser import RobotFileParser
+
+import requests
+
+import pandas as pd
+from bs4 import BeautifulSoup
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
+LOG_DIR = PROJECT_ROOT / "outputs" / "logs"
+
+# Selenium imports
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import WebDriverException
+
+# ── Chọn driver phù hợp ──────────────────────────────────────────────────────
+try:
+    import undetected_chromedriver as uc
+    USE_UC = True
+    print("[INFO] Đang dùng undetected-chromedriver (vượt Cloudflare tốt nhất)")
+except ImportError:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from webdriver_manager.chrome import ChromeDriverManager
+    USE_UC = False
+    print("[WARN] Chưa cài undetected-chromedriver → dùng Selenium chuẩn")
+    print("[WARN] Khuyến nghị chạy: pip install undetected-chromedriver")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 1 — KHỞI TẠO TRÌNH DUYỆT
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_driver():
+    """
+    Khởi tạo Chrome với cấu hình ẩn dấu vết Bot để tránh bị Cloudflare chặn.
+    undetected-chromedriver tự động patch binary Chrome ở mức C++ nên không bị
+    phát hiện qua navigator.webdriver.
+    """
+    if USE_UC:
+        options = uc.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        driver = uc.Chrome(options=options, headless=False, use_subprocess=True)
+    else:
+        chrome_options = Options()
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        chrome_options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options,
+        )
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"},
+        )
+    return driver
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 2 — CÁC HÀM TIỆN ÍCH & KIỂM TRA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_and_bypass_cloudflare(driver, max_wait_seconds=120):
+    """
+    Kiểm tra nếu gặp màn hình Cloudflare challenge.
+    Tự động phát hiện khi người dùng đã tick xong trên trình duyệt và tự động
+    tiếp tục ngay lập tức — KHÔNG CẦN quay lại terminal nhấn phím ENTER.
+    """
+    title = driver.title.lower()
+    page_src = driver.page_source.lower()
+
+    if "you have been blocked" in page_src or ("attention required" in title and "blocked" in page_src):
+        print("\n[❌ CẢNH BÁO] IP bị Cloudflare chặn tạm thời!")
+        print("   → Vui lòng chuyển sang mạng khác (ví dụ: phát 4G/hotspot điện thoại).")
+        print("   → Hệ thống đang tự động theo dõi, sẽ tự chạy tiếp ngay khi mạng được đổi...")
+        start_wait = time.time()
+        while time.time() - start_wait < max_wait_seconds:
+            time.sleep(2.0)
+            if "you have been blocked" not in driver.page_source.lower():
+                print("   [✓] Đã khôi phục kết nối! Tự động tiếp tục...")
+                return
+        return
+
+    if any(kw in title for kw in ["just a moment", "verify", "bảo mật", "checking"]):
+        print("\n[⚠️ XÁC MINH] Cloudflare yêu cầu kiểm tra người dùng thật!")
+        print("   >>> Vui lòng tick vào ô 'Verify you are human' trên cửa sổ Chrome...")
+        print("   >>> (Hệ thống sẽ tự động chạy tiếp ngay khi bạn tick xong, không cần bấm phím nào!)")
+        
+        start_wait = time.time()
+        while time.time() - start_wait < max_wait_seconds:
+            time.sleep(1.5)
+            curr_title = driver.title.lower()
+            # Khi người dùng tick xong, Cloudflare chuyển hướng về trang TopCV và title đổi
+            if not any(kw in curr_title for kw in ["just a moment", "verify", "bảo mật", "checking"]):
+                print("   [✓] Xác minh thành công! Đang tự động tiếp tục...")
+                time.sleep(1.2)
+                return
+        print("   [!] Hết thời gian chờ xác minh (quá 2 phút).")
+
+
+def auto_scroll(driver, steps=4):
+    """
+    Cuộn trang nhẹ để kích hoạt tải dữ liệu động (Lazy Loading) trên TopCV.
+    """
+    for _ in range(steps):
+        driver.execute_script(f"window.scrollBy(0, {random.randint(400, 750)});")
+        time.sleep(random.uniform(0.4, 0.9))
+    driver.execute_script("window.scrollBy(0, -200);")
+    time.sleep(0.3)
+
+
+def is_date_string(text):
+    """Kiểm tra chuỗi có phải ngày đăng tuyển (tránh nhầm với địa điểm)"""
+    if not text:
+        return False
+    return any(p in text.lower() for p in ["ngày trước", "tuần trước", "tháng trước", "hôm nay", "giờ trước"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 3 — TRÍCH XUẤT CHI TIẾT TRANG CÔNG VIỆC (HỖ TRỢ CẢ GIAO DIỆN MỚI & CŨ)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _text(node):
+    return node.get_text(" ", strip=True) if node else None
+
+
+def _labeled_values(soup):
+    """Đọc đúng cặp nhãn/giá trị, không quét text của các div cha."""
+    values = {}
+    layouts = [
+        (".box-header-job-list-info__item, .list-info__content",
+         ".list-info__content__title", ".list-info__content__desc"),
+        (".job-detail__info--section", ".job-detail__info--section-content-title",
+         ".job-detail__info--section-content-value"),
+        (".box-job-information-general-info-list__item",
+         ".box-job-information-general-info-list__item--content-title",
+         ".box-job-information-general-info-list__item--content-desc"),
+        (".box-general-group-info-item", ".box-general-group-info-title",
+         ".box-general-group-info-value"),
+    ]
+    for items, label_selector, value_selector in layouts:
+        for item in soup.select(items):
+            label = _text(item.select_one(label_selector))
+            value = _text(item.select_one(value_selector))
+            if label and value:
+                values.setdefault(label.casefold().strip(" :"), value)
+    return values
+
+
+def parse_topcv_html(html, job_url, fallback_info=None):
+    """Phân tích DOM đã tải; các trường thô không chuẩn hóa hoặc bỏ HTML."""
+    fallback = fallback_info or {}
+    soup = BeautifulSoup(html, "html.parser")
+    title = _text(soup.select_one("h1.box-header-job__title, h1.job-detail__info--title, h1.title"))
+    # Không lưu trang lỗi/challenge chỉ vì card danh sách có tiêu đề.
+    sections = soup.select(".box-job-information-detail-item, .job-description__item")
+    if not title or not sections:
+        raise ValueError("Không nhận diện được trang chi tiết TopCV")
+    values = _labeled_values(soup)
+    company = _text(soup.select_one(".box-company-info a.name, .job-detail__company--information a.name, .company-name-label a"))
+    salary = _text(soup.select_one(".box-header-job__salary--title, .salary-text")) or values.get("mức lương")
+    location = None
+    for item in soup.select(".box-job-information-address-and-time-list__item"):
+        label = _text(item.select_one(".box-job-information-address-and-time-list__item--title"))
+        if label and label.casefold().strip(" :") in ("địa điểm làm việc", "location", "work location", "working location"):
+            location = _text(item.select_one(".box-job-information-address-and-time-list__item--content"))
+            break
+    content = {}
+    for item in sections:
+        heading_node = item.select_one(".box-job-information-detail-item__title h2, h3") or item.select_one(".box-job-information-detail-item__title")
+        heading = _text(heading_node)
+        if not heading:
+            continue
+        heading = heading.casefold()
+        key = None
+        classes = item.get("class", [])
+        if "box-job-information-required-candidate" in classes:
+            key = "Yeu_Cau"
+        elif "box-job-information-benefit" in classes:
+            key = "Quyen_Loi"
+        elif "mô tả công việc" in heading or "job description" in heading:
+            key = "Mo_Ta_Cong_Viec"
+        elif "yêu cầu" in heading or "requirements" in heading or "qualifications" in heading:
+            key = "Yeu_Cau"
+        elif "quyền lợi" in heading or "chế độ" in heading or "benefits" in heading:
+            key = "Quyen_Loi"
+        node = item.select_one(".box-job-information-detail-item__text, .job-description__item--content")
+        if key and node:
+            # Giữ cả nội dung phụ (kỹ năng/phúc lợi) nằm ngoài khối text.
+            nodes = [node, *item.select(".required-tags")]
+            if key == "Mo_Ta_Cong_Viec":
+                content[key] = "\n".join(str(part) for part in nodes)
+            else:
+                # Mỗi mục giữ HTML tiêu đề và nội dung gốc, không ghép hai cột.
+                content[key] = "\n".join(str(part) for part in [heading_node, *nodes])
+    if not content.get("Mo_Ta_Cong_Viec"):
+        raise ValueError("Thiếu khối mô tả công việc; không lưu tin giả đầy đủ")
+    experience = values.get("kinh nghiệm") or values.get("kinh nghiệm chuyên môn") or fallback.get("experience_raw")
+    job = {
+        "job_title": title,
+        "company_name": company or fallback.get("company_name"),
+        "location_raw": location or values.get("địa điểm") or fallback.get("location_raw"),
+        "salary_raw": salary or fallback.get("salary_raw"),
+        "experience_raw": experience,
+        "description_raw": content.get("Mo_Ta_Cong_Viec"),
+        "requirements_raw": content.get("Yeu_Cau"),
+        "benefits_raw": content.get("Quyen_Loi"),
+        "level_raw": values.get("cấp bậc"),
+        "source_url": job_url,
+        "scraped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    return job
+
+
+def parse_topcv_job_detail(driver, job_url, fallback_info=None):
+    driver.get(job_url)
+    time.sleep(random.uniform(2.0, 3.2))
+    check_and_bypass_cloudflare(driver)
+    WebDriverWait(driver, 20).until(
+        lambda browser: browser.find_elements(By.CSS_SELECTOR, ".box-job-information-detail-item__text, .job-description__item--content")
+    )
+    auto_scroll(driver, steps=3)
+    return parse_topcv_html(driver.page_source, job_url, fallback_info)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 4 — TRÍCH XUẤT THÔNG TIN NHANH TỪ DANH SÁCH (CARD LISTING)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_card_fallback(card):
+    """Lấy dữ liệu dự phòng từ thẻ công việc trên trang danh sách tìm kiếm"""
+    dia_diem = None
+    for sel in [".label-content a.address", "div.label-content label.address", "span.address", "div.city-label"]:
+        el = card.select_one(sel)
+        if el:
+            txt = el.get_text(strip=True)
+            if txt and not is_date_string(txt):
+                dia_diem = txt
+                break
+
+    def get_first(selectors):
+        for s in selectors:
+            el = card.select_one(s)
+            if el and el.get_text(strip=True):
+                return el.get_text(strip=True)
+        return None
+
+    return {
+        "job_title": get_first(["h3.title a", "h2.title a", "a.job-title"]),
+        "company_name": get_first(["a.company", "div.company-name", "span.company-name"]),
+        "salary_raw": get_first(["label.title-salary", "span.salary", "div.salary"]),
+        "location_raw": dia_diem,
+        "experience_raw": get_first(["label.exp", "span.exp", "div.exp"]),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 5 — HÀM ĐIỀU PHỐI THU THẬP DỮ LIỆU CHÍNH
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _page_url(base_url, page):
+    parts = urlsplit(base_url)
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "page"]
+    return urlunsplit(parts._replace(query=urlencode([*query, ("page", page)]), fragment=""))
+
+
+def _job_url(href, base_url):
+    parts = urlsplit(urljoin(base_url, href))
+    job_path = re.fullmatch(r"/viec-lam/[^/]+/\d+\.html|/brand/[^/]+/tuyen-dung/[^/]+-j\d+\.html", parts.path)
+    if parts.scheme not in ("https", "http") or parts.hostname not in ("www.topcv.vn", "topcv.vn") or not job_path:
+        return None
+    return urlunsplit(parts._replace(query="", fragment=""))
+
+
+def crawl_topcv(search_urls, max_pages_per_url=None, output_csv=None, max_jobs=None):
+    """Duyệt tới trang cuối; mặc định lưu dữ liệu thô tại data/raw."""
+    output = Path(output_csv) if output_csv is not None else RAW_DATA_DIR / f"raw_data_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    # Không ghi đè bộ dữ liệu người dùng đã có.
+    if output.exists():
+        raise FileExistsError(f"{output} đã tồn tại. Chọn --output khác để giữ dữ liệu cũ.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    response = requests.get("https://www.topcv.vn/robots.txt", timeout=30)
+    response.raise_for_status()
+    robots = RobotFileParser()
+    robots.parse(response.text.splitlines())
+    driver = init_driver()
+    all_jobs, failures, seen_urls = [], [], set()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    errors_path = LOG_DIR / f"{output.stem}.errors.csv"
+
+    def save():
+        if all_jobs:
+            pd.DataFrame(all_jobs).to_csv(output, index=False, encoding="utf-8-sig")
+        if failures:
+            pd.DataFrame(failures).to_csv(errors_path, index=False, encoding="utf-8-sig")
+
+    def visit_allowed(url):
+        if not robots.can_fetch("*", url):
+            raise PermissionError(f"robots.txt không cho phép: {url}")
+        time.sleep(max(random.uniform(2.0, 3.5), robots.crawl_delay("*") or 0))
+
+    try:
+        for base_url in search_urls:
+            page_num = int(dict(parse_qsl(urlsplit(base_url).query)).get("page", "1"))
+            pages_read, page_signatures = 0, set()
+            while max_pages_per_url is None or pages_read < max_pages_per_url:
+                if max_jobs is not None and len(all_jobs) >= max_jobs:
+                    break
+                page_url = _page_url(base_url, page_num)
+                print(f"[Trang {page_num}] {page_url}")
+                visit_allowed(page_url)
+                driver.get(page_url)
+                check_and_bypass_cloudflare(driver)
+                WebDriverWait(driver, 25).until(
+                    lambda browser: browser.find_elements(By.CSS_SELECTOR, ".job-item-search-result, .job-item-2, .job-item")
+                )
+                auto_scroll(driver, steps=5)
+                soup = BeautifulSoup(driver.page_source, "html.parser")
+                cards = soup.select(".job-item-search-result, .job-item-2, .job-item")
+                targets = {}
+                for card in cards:
+                    anchor = card.select_one("h3.title a, h2.title a, a.job-title")
+                    url = _job_url(anchor.get("href", ""), page_url) if anchor else None
+                    if url:
+                        targets.setdefault(url, extract_card_fallback(card))
+                if not targets:
+                    raise ValueError(f"Không nhận diện được danh sách tin: {page_url}")
+                signature = frozenset(targets)
+                if signature in page_signatures:
+                    raise ValueError(f"TopCV trả lại trang cũ, dừng để tránh lặp: {page_url}")
+                page_signatures.add(signature)
+                next_link = soup.select_one('.pagination a[rel="next"], a[rel="next"]')
+                for job_url, fallback in targets.items():
+                    if max_jobs is not None and len(all_jobs) >= max_jobs:
+                        break
+                    job_id = re.search(r"(?:/|-j)(\d+)\.html$", job_url)[1]
+                    if job_id in seen_urls:
+                        continue
+                    seen_urls.add(job_id)
+                    try:
+                        visit_allowed(job_url)
+                        job = parse_topcv_job_detail(driver, job_url, fallback)
+                        all_jobs.append(job)
+                        print(f"[{len(all_jobs)}] {job['job_title']}")
+                    except (WebDriverException, ValueError, PermissionError) as error:
+                        failures.append({
+                            "URL_Goc": job_url, "URL_Tim_Kiem": page_url,
+                            "Timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+                            "Loi": str(error),
+                        })
+                        print(f"[LỖI] {job_url}: {error}")
+                    save()
+                pages_read += 1
+                if not next_link:
+                    if not soup.select_one(".pagination"):
+                        raise ValueError("Không nhận diện được phân trang; không thể xác nhận đã cào hết")
+                    print("[HẾT TRANG] Không còn liên kết tiếp theo.")
+                    break
+                # data-href của TopCV chỉ có page; giữ nguyên bộ lọc URL đầu vào.
+                next_href = next_link.get("data-href") or next_link.get("href") or ""
+                next_page = dict(parse_qsl(urlsplit(urljoin(page_url, next_href)).query)).get("page")
+                if not next_page or not next_page.isdigit() or int(next_page) <= page_num:
+                    raise ValueError(f"Không đọc được trang kế tiếp: {next_href}")
+                page_num = int(next_page)
+    finally:
+        save()
+        driver.quit()
+        print(f"[ĐÃ LƯU] {len(all_jobs)} tin, {len(failures)} lỗi; dữ liệu: {output}")
+    return all_jobs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHẦN 6 — ĐIỂM BẮT ĐẦU CHƯƠNG TRÌNH
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    TOPCV_SEARCH_URLS = [
+        "https://www.topcv.vn/tim-viec-lam-devops-engineer-cr257cb262cl288?type_keyword=1&disable_auto_detect_type_keyword=1&sba=1&category_family=r257~b258_b259_b262l288,290_b264l304_b265_b266l308,311,309,310,312,313_b267l317,320_b268_b269l324,327,326&saturday_status=0"
+    ]
+
+    parser = argparse.ArgumentParser(description="Thu thập dữ liệu thô TopCV, giữ HTML và dấu vết thời gian.")
+    parser.add_argument("--url", action="append", help="URL TopCV; có thể truyền nhiều lần.")
+    parser.add_argument("--max-pages", type=int, help="Giới hạn số trang để demo; mặc định duyệt hết.")
+    parser.add_argument("--max-jobs", type=int, help="Giới hạn số tin để demo; mặc định không giới hạn.")
+    parser.add_argument("--output", help="Đường dẫn CSV tùy chọn; mặc định lưu trong data/raw của project.")
+    args = parser.parse_args()
+    if any(value is not None and value < 1 for value in (args.max_pages, args.max_jobs)):
+        parser.error("--max-pages và --max-jobs phải lớn hơn 0")
+    crawl_topcv(args.url or TOPCV_SEARCH_URLS, args.max_pages, args.output, args.max_jobs)
