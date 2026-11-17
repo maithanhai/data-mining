@@ -224,19 +224,19 @@ def parse_topcv_html(html, job_url, fallback_info=None):
                 content[key] = "\n".join(str(part) for part in [heading_node, *nodes])
     if not content.get("Mo_Ta_Cong_Viec"):
         raise ValueError("Thiếu khối mô tả công việc; không lưu tin giả đầy đủ")
-    experience = values.get("kinh nghiệm") or values.get("kinh nghiệm chuyên môn") or fallback.get("Kinh_Nghiem")
+    experience = values.get("kinh nghiệm") or values.get("kinh nghiệm chuyên môn") or fallback.get("experience_raw")
     job = {
-        "Tieu_De": title,
-        "Ten_Cong_Ty": company or fallback.get("Ten_Cong_Ty"),
-        "Dia_Diem": location or values.get("địa điểm") or fallback.get("Dia_Diem"),
-        "Muc_Luong_Goc": salary or fallback.get("Muc_Luong_Goc"),
-        "Kinh_Nghiem": experience,
-        "Mo_Ta_Cong_Viec": content.get("Mo_Ta_Cong_Viec"),
-        "Yeu_Cau": content.get("Yeu_Cau"),
-        "Quyen_Loi": content.get("Quyen_Loi"),
-        "Cap_Bac": values.get("cấp bậc"),
-        "URL_Goc": job_url,
-        "Timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "job_title": title,
+        "company_name": company or fallback.get("company_name"),
+        "location_raw": location or values.get("địa điểm") or fallback.get("location_raw"),
+        "salary_raw": salary or fallback.get("salary_raw"),
+        "experience_raw": experience,
+        "description_raw": content.get("Mo_Ta_Cong_Viec"),
+        "requirements_raw": content.get("Yeu_Cau"),
+        "benefits_raw": content.get("Quyen_Loi"),
+        "level_raw": values.get("cấp bậc"),
+        "source_url": job_url,
+        "scraped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     return job
 
@@ -275,11 +275,11 @@ def extract_card_fallback(card):
         return None
 
     return {
-        "Tieu_De": get_first(["h3.title a", "h2.title a", "a.job-title"]),
-        "Ten_Cong_Ty": get_first(["a.company", "div.company-name", "span.company-name"]),
-        "Muc_Luong_Goc": get_first(["label.title-salary", "span.salary", "div.salary"]),
-        "Dia_Diem": dia_diem,
-        "Kinh_Nghiem": get_first(["label.exp", "span.exp", "div.exp"]),
+        "job_title": get_first(["h3.title a", "h2.title a", "a.job-title"]),
+        "company_name": get_first(["a.company", "div.company-name", "span.company-name"]),
+        "salary_raw": get_first(["label.title-salary", "span.salary", "div.salary"]),
+        "location_raw": dia_diem,
+        "experience_raw": get_first(["label.exp", "span.exp", "div.exp"]),
     }
 
 
@@ -370,7 +370,7 @@ def crawl_topcv(search_urls, max_pages_per_url=None, output_csv=None, max_jobs=N
                         visit_allowed(job_url)
                         job = parse_topcv_job_detail(driver, job_url, fallback)
                         all_jobs.append(job)
-                        print(f"[{len(all_jobs)}] {job['Tieu_De']}")
+                        print(f"[{len(all_jobs)}] {job['job_title']}")
                     except (WebDriverException, ValueError, PermissionError) as error:
                         failures.append({
                             "URL_Goc": job_url, "URL_Tim_Kiem": page_url,

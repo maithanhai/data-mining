@@ -1,4 +1,0 @@
--r Crawler/requirements.txt
-jupyterlab>=4.0
-numpy>=1.26
-matplotlib>=3.8

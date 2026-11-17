@@ -1,73 +1,56 @@
 # Thu thập dữ liệu TopCV
 
-## Chạy crawler
+`scraper.py` duyệt các trang kết quả và truy cập từng tin để lấy dữ liệu thô cho đề tài khối nghề phần mềm.
 
-Yêu cầu Python và Google Chrome.
+## Chạy
 
-```powershell
-cd Crawler
-pip install -r requirements.txt
-python scraper.py
-```
-
-Mặc định dùng URL đã cấu hình cuối `scraper.py`, duyệt hết phân trang, không giới hạn tin.
-Xuất `data/raw/raw_data_YYYYMMDD_HHMMSS.csv` theo thư mục gốc project, dù chạy từ root hay `Crawler/`. Không ghi đè dữ liệu cũ.
-
-Truyền URL khác, đặt trong ngoặc kép để giữ các tham số `&`:
+Yêu cầu Python và Google Chrome. Các lệnh dưới đây chạy từ thư mục gốc project:
 
 ```powershell
-python scraper.py --url "https://www.topcv.vn/tim-viec-lam-python" --output raw_python.csv
+python -m pip install -r Crawler/requirements.txt
+python Crawler/scraper.py
 ```
 
-Demo:
+Mặc định sử dụng `TOPCV_SEARCH_URLS` trong script, không giới hạn số trang hoặc số tin.
+
+Chạy thử:
 
 ```powershell
-python scraper.py --max-pages 1 --max-jobs 3 --output demo_topcv.csv
+python Crawler/scraper.py --max-pages 1 --max-jobs 3
 ```
 
-Có thể lặp `--url` nhiều lần; khử trùng URL trong cùng lượt chạy.
-URL có `page` sẽ bắt đầu tại trang đó. Đọc `rel="next"` / `data-href`, giữ bộ lọc
-ban đầu và dừng khi hết trang. Trang lặp hoặc lỗi tải danh sách gây dừng kèm lỗi,
-không được coi là đã cào hết. Không bảo đảm đạt 800–1.500 tin: số lượng phụ thuộc nguồn.
+Chọn URL khác:
 
-## Dữ liệu đối chiếu PDF
+```powershell
+python Crawler/scraper.py --url "https://www.topcv.vn/tim-viec-lam-software-engineering-cr257cb258"
+```
 
-| Trường | Nội dung |
+Có thể truyền `--url` nhiều lần. Đặt toàn bộ URL trong dấu ngoặc kép nếu có tham số `&`. Xem các tùy chọn bằng `python Crawler/scraper.py --help`.
+
+## Dữ liệu đầu ra
+
+Mặc định lưu vào `data/raw/raw_data_YYYYMMDD_HHMMSS.csv`, dùng UTF-8 BOM. Với `--output`, đường dẫn tương đối được tính từ thư mục chạy lệnh. Script không ghi đè CSV đã tồn tại.
+
+| Cột | Nội dung |
 | --- | --- |
-| `Tieu_De`, `Ten_Cong_Ty` | Tiêu đề và công ty |
-| `Muc_Luong_Goc` | Lương hiển thị nguyên văn, gồm “Thoả thuận” |
-| `Dia_Diem` | Ưu tiên địa chỉ làm việc chi tiết, dự phòng tóm tắt/card |
-| `Kinh_Nghiem` | Kinh nghiệm chuyên môn nguyên văn |
-| `Mo_Ta_Cong_Viec` | HTML riêng khối mô tả, không lẫn yêu cầu/quyền lợi |
-| `Yeu_Cau` | HTML mục yêu cầu ứng viên, giữ tiêu đề và nội dung bổ sung |
-| `Quyen_Loi` | HTML mục quyền lợi, giữ tiêu đề và nội dung bổ sung |
-| `Cap_Bac` | Cấp bậc nguyên văn tại “Thông tin chung” |
-| `URL_Goc` | URL trực tiếp của tin, bỏ tracking |
-| `Timestamp` | Thời điểm lấy tin, ISO 8601 có múi giờ |
+| `job_title` | Tiêu đề công việc |
+| `company_name` | Tên công ty |
+| `location_raw` | Địa điểm làm việc nguyên văn |
+| `salary_raw` | Mức lương nguyên văn |
+| `experience_raw` | Kinh nghiệm yêu cầu |
+| `description_raw` | HTML mô tả công việc |
+| `requirements_raw` | HTML yêu cầu ứng viên và tag bổ sung |
+| `benefits_raw` | HTML quyền lợi và tag bổ sung |
+| `level_raw` | Cấp bậc hiển thị trên TopCV |
+| `source_url` | URL trực tiếp đến tin, bỏ tracking |
+| `scraped_at` | Thời điểm cào, có múi giờ |
 
-CSV mới có 11 cột trên. Không tách khoảng năm kinh nghiệm, không chuẩn hóa lương,
-không suy luận cấp bậc và không tạo các cột metadata phụ trong dữ liệu thô.
+Crawler không chuẩn hóa lương, suy luận cấp bậc hay loại stopwords. Các bước này thực hiện trong notebook.
 
-Nhận diện mục yêu cầu/quyền lợi bằng class cấu trúc TopCV trước, dự phòng tiêu đề
-Việt/Anh (`Candidate Requirements`, `Requirements`, `Qualifications`, `Benefits`).
-Địa chỉ chi tiết hỗ trợ cả nhãn `Địa điểm làm việc` và `Location`.
-Nội dung HTML giữ nguyên ngôn ngữ của bài đăng.
+## Lưu ý
 
-Đây là dữ liệu thô cho bước 2.1: giữ HTML để notebook làm sạch, chuẩn hóa lương,
-địa điểm và kỹ năng ở tập sạch riêng. Cột cấp bậc hỗ trợ bước 2.2,
-không thay thế toàn bộ EDA/KDD của PDF.
-
-## Lưu trữ và truy cập
-
-CSV dùng UTF-8 BOM, giữ HTML và nội dung nhiều dòng. Lưu sau mỗi tin và khi dừng.
-Tin lỗi ghi vào `outputs/logs/<tên-file>.errors.csv` kèm URL, thời gian, lý do.
-Trang thiếu mô tả/không đúng giao diện không được lưu thành tin hợp lệ.
-Thông tin không có trên nguồn để trống, không tự điền hay suy đoán.
-
-Đọc `robots.txt` trước khi chạy, kiểm tra quyền truy cập URL, chờ ngẫu nhiên,
-cuộn kích hoạt lazy loading và đợi DOM. Nếu gặp xác minh, thao tác thủ công trong
-Chrome; không bảo đảm vượt được chặn truy cập.
-
-Các CSV cũ vẫn giữ schema gộp `Yeu_Cau_Quyen_Loi`, không tự chuyển đổi hay ghi đè.
-Notebook khám phá dữ liệu cũ nằm tại `notebooks/explore_data_legacy.ipynb`.
-Các bước xử lý KDD sẽ chạy trong `.ipynb`, không đưa vào scraper.
+- Giữ bộ lọc của URL khi phân trang; khử trùng theo mã tin trong cùng lượt chạy.
+- Kiểm tra `robots.txt`, chờ ngẫu nhiên và cuộn trang để tải nội dung.
+- Nếu gặp xác minh truy cập, thao tác thủ công trong Chrome; có thể không lấy được tin bị chặn.
+- Lưu dữ liệu sau mỗi tin. Lỗi lấy chi tiết được ghi tại `outputs/logs/<tên-file>.errors.csv`; script không tự cào lại tin lỗi.
+- Tin không có khối mô tả hợp lệ sẽ không được lưu. Các trường khác không lấy được để trống.
