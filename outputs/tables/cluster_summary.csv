@@ -1,3 +1,3 @@
 cluster,n_jobs,profile_name,top3_skills
-0,293,"Nổi bật: giao tiếp, kiểm thử, api",giao tiếp: 59%; kiểm thử: 51%; api: 48%
-1,569,"Nổi bật: giao tiếp, tư duy logic, giải quyết vấn đề",giao tiếp: 24%; tư duy logic: 17%; giải quyết vấn đề: 12%
+0,215,"Nổi bật: docker, api, ci/cd",docker: 66%; api: 63%; ci/cd: 61%
+1,647,"Nổi bật: giao tiếp, kiểm thử, tiếng anh",giao tiếp: 57%; kiểm thử: 42%; tiếng anh: 41%
