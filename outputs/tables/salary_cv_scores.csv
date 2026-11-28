@@ -1,3 +1,3 @@
 model,cv_macro_f1,best_params
-DecisionTree,0.6129373360031959,"{'model__ccp_alpha': 0.02, 'model__max_depth': 4}"
-RandomForest,0.4462368026540609,"{'model__max_depth': None, 'model__min_samples_leaf': 2}"
+DecisionTree,0.6351053755129973,"{'model__ccp_alpha': 0.0, 'model__max_depth': None}"
+RandomForest,0.49551572298885915,"{'model__max_depth': None, 'model__min_samples_leaf': 2}"
